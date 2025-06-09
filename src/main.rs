@@ -1,21 +1,24 @@
-use std::{
-    collections::HashSet,
-    env::home_dir,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{env::home_dir, fs, path::PathBuf};
 
+use args::{Args, SegmentSelection};
 use clap::Parser;
+use fontdrasil::coords::{UserCoord, UserLocation};
 use harfruzz::{GlyphBuffer, ShaperFont};
 use kurbo::{
     Affine, BezPath, Circle, Line, ParamCurve, ParamCurveNearest, PathSeg, Point, Rect, Shape, Vec2,
 };
+use log::{debug, info, warn};
 use ordered_float::OrderedFloat;
+use read_fonts::types::{F2Dot14, NameId};
 use skrifa::{
-    MetadataProvider,
+    MetadataProvider, Tag,
+    instance::Location,
     outline::{DrawSettings, OutlinePen},
     prelude::{LocationRef, Size},
+    raw::TableProvider,
 };
+
+mod args;
 
 trait Tangent {
     // Returns (point at t, vector in direction of tangent)
@@ -29,7 +32,7 @@ impl Tangent for PathSeg {
         match self {
             PathSeg::Line(line) => {
                 let curr = line.eval(t);
-                let tan = (line.p1 - line.p0);
+                let tan = line.p1 - line.p0;
                 (curr, tan)
             }
             PathSeg::Quad(quad) => {
@@ -44,39 +47,6 @@ impl Tangent for PathSeg {
             }
         }
     }
-}
-
-#[derive(Debug, Default, Copy, Clone, clap::ValueEnum)]
-enum SegmentSelection {
-    /// Cast rays from center of mass, stopping at nearest path segment
-    #[default]
-    CenterOfMass,
-    /// Cast multiple rays perpendicular to each path segment
-    AllSegments,
-}
-
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
-    /// Where to save svg files
-    #[arg(short, long, default_value = "/tmp/an.svg")]
-    output_svg: String,
-
-    /// The text to draw
-    #[arg(short, long)]
-    char: char,
-
-    /// The font to process
-    #[arg(long)]
-    font: String,
-
-    /// How to cast rays to discover strokes
-    #[arg(long)]
-    method: SegmentSelection,
-
-    /// Whether to draw rays in the output svg
-    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-    show_rays: bool,
 }
 
 struct PathPen {
@@ -157,9 +127,14 @@ impl OutlinePen for PathPen {
 
 // Simplified version of <https://github.com/harfbuzz/harfruzz/blob/006472176ab87e3a84e799e74e0ac19fbe943dd7/tests/shaping/main.rs#L107>
 // Will have to update if/when that API updates
-fn shape(text: &str, font: &harfruzz::FontRef) -> GlyphBuffer {
+fn shape(text: &str, font: &harfruzz::FontRef, loc: &LocationRef) -> GlyphBuffer {
+    let coords = loc
+        .coords()
+        .iter()
+        .map(|v| F2Dot14::from_f32(v.to_f32()))
+        .collect::<Vec<_>>();
     let shaper_font = ShaperFont::new(font);
-    let face = shaper_font.shaper(font, &[]);
+    let face = shaper_font.shaper(font, &coords);
 
     let mut buffer = harfruzz::UnicodeBuffer::new();
     buffer.push_str(text);
@@ -167,17 +142,15 @@ fn shape(text: &str, font: &harfruzz::FontRef) -> GlyphBuffer {
     harfruzz::shape(&face, &[], buffer)
 }
 
-struct DebugSvgBuilder {
+struct WidthReader {
     path: BezPath,
     bbox: Rect,
     max_dim: f64,
-    margin: f64,
-    dot_radius: f64,
     ray_width: f64,
 }
 
-impl DebugSvgBuilder {
-    fn new(raw_font: &[u8], ch: char) -> Self {
+impl WidthReader {
+    fn new(raw_font: &[u8], ch: char, loc: &Location) -> Self {
         let harf_font_ref =
             harfruzz::FontRef::new(&raw_font).expect("For font files to be font files!");
         let skrifa_font_ref = skrifa::FontRef::new(&raw_font).expect("Fonts to be fonts");
@@ -185,14 +158,14 @@ impl DebugSvgBuilder {
         let outlines = skrifa_font_ref.outline_glyphs();
         let mut pen = PathPen::default();
 
-        let glyphs = shape(&format!("{}", ch), &harf_font_ref);
+        let glyphs = shape(&format!("{}", ch), &harf_font_ref, &LocationRef::from(loc));
         for (glyph_info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
             let glyph = outlines
                 .get(glyph_info.glyph_id.into())
                 .expect("Glyphs to exist!");
             glyph
                 .draw(
-                    DrawSettings::unhinted(Size::unscaled(), LocationRef::default()),
+                    DrawSettings::unhinted(Size::unscaled(), LocationRef::from(loc)),
                     &mut pen,
                 )
                 .expect("To draw!");
@@ -208,14 +181,11 @@ impl DebugSvgBuilder {
         let max_dim = bbox.width().max(bbox.height());
         let margin = 0.03 * max_dim;
         let bbox = bbox.inflate(margin, margin).expand();
-        let dot_radius = margin / 32.0;
         let ray_width = margin / 64.0;
         Self {
             path,
             bbox,
             max_dim,
-            margin,
-            dot_radius,
             ray_width,
         }
     }
@@ -247,8 +217,8 @@ impl DebugSvgBuilder {
             }
         }
 
-        if num_filled > num_unfilled {
-            eprintln!("OMG reverse video?! TODO: invert winding?");
+        if num_filled as f64 > 0.75 * (num_filled as f64 + num_unfilled as f64) {
+            warn!("OMG reverse video?! TODO: invert winding?");
         };
 
         let (sum_x, sum_y) = live
@@ -265,7 +235,8 @@ impl DebugSvgBuilder {
 
         // Spray rays passing through center of mass
         let ray = self.make_x_ray(center_of_mass);
-        let mut candidates = WidthCandidates::default();
+        let mut rays = Vec::new();
+        let mut ribs = Vec::new();
         for i in 0..360 {
             //for i in 0..1 {
             let rot = Affine::rotate_about((i as f64).to_radians(), center_of_mass);
@@ -283,7 +254,7 @@ impl DebugSvgBuilder {
                 .reduce(|acc, e| if acc.0.line_t <= e.0.line_t { acc } else { e })
             else {
                 // Swing and a miss
-                candidates.rays.push(ray);
+                rays.push(ray);
                 continue;
             };
 
@@ -300,8 +271,16 @@ impl DebugSvgBuilder {
                     normal2
                 };
 
+            // If away from center is wildly divergent from ray discard it
+            // This helps with things like Kablammo taking readings from outcrops
+            // Annoyingly it also over-drops for Lobster
+            // if (away_from_center.angle() - (ray.p1 - ray.p0).angle()).abs() > 30_f64.to_radians() {
+            //     debug!("Discard!");
+            //     continue;
+            // }
+
             // record our ray as far as the point of intersection
-            candidates.rays.push(Line {
+            rays.push(Line {
                 p0: center_of_mass,
                 p1: pt,
             });
@@ -323,29 +302,28 @@ impl DebugSvgBuilder {
                         }
                     })
             {
-                candidates.candidates.push(nearest_candidate);
+                ribs.push(nearest_candidate);
             }
         }
 
-        candidates
+        WidthCandidates::new(&self.path, rays, ribs)
     }
 
     fn cast_rays_from_all_segments(&self) -> WidthCandidates {
-        let mut candidates = WidthCandidates::default();
+        let mut rays = Vec::new();
+        let mut ribs = Vec::new();
         for segment in self.path.segments() {
             for i in 0..10 {
                 let t = 0.1 * i as f64;
                 let (on_path, tangent) = segment.tangent(t);
                 let normal = tangent.turn_90();
                 let ray = Affine::rotate_about(normal.angle(), on_path) * self.make_x_ray(on_path);
-                candidates.rays.push(ray);
+                rays.push(ray);
                 // Keep all the candidates
-                candidates
-                    .candidates
-                    .extend(self.ray_to_inked_segments(ray));
+                ribs.extend(self.ray_to_inked_segments(ray));
             }
         }
-        candidates
+        WidthCandidates::new(&self.path, rays, ribs)
     }
 
     // Returns one line segment per continuously inked area encountered
@@ -422,9 +400,17 @@ impl DebugSvgBuilder {
             }
         }
 
-        for (candidate, stroke_dot) in candidates.evaluate_candidates(&self.path) {
-            svg.push_str(&format!("  <line stroke=\"pink\" stroke-width=\"{}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" />\n",
-                self.ray_width, candidate.p0.x, candidate.p0.y, candidate.p1.x, candidate.p1.y));
+        let tolerance = 0.1;
+        for (candidate, stroke_dot) in candidates.ribs.iter() {
+            let (width, color) = match candidate.length() {
+                l if (l - candidates.max_width).abs() <= tolerance => {
+                    (3.0 * self.ray_width, "green")
+                }
+                l if (l - candidates.min_width).abs() <= tolerance => (3.0 * self.ray_width, "red"),
+                _ => (self.ray_width, "pink"),
+            };
+            svg.push_str(&format!("  <line stroke=\"{color}\" stroke-width=\"{}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" />\n",
+                width, candidate.p0.x, candidate.p0.y, candidate.p1.x, candidate.p1.y));
 
             svg.push_str(&format!("  <circle r=\"{}\" ", stroke_dot.radius));
             svg.push_str(&format!(
@@ -447,67 +433,158 @@ impl DebugSvgBuilder {
 #[derive(Debug, Default)]
 struct WidthCandidates {
     rays: Vec<Line>,
-    candidates: Vec<Line>,
+    ribs: Vec<(Line, Circle)>,
+    min_width: f64,
+    max_width: f64,
 }
 
 impl WidthCandidates {
-    /// Iterate each candidate and the largest circle around it's midpoint we were able to fit into the inked shape
-    fn evaluate_candidates(&self, path: &BezPath) -> impl Iterator<Item = (Line, Circle)> {
-        self.candidates.iter().filter_map(|candidate| {
-            // See if a circle around the midpoint of our line goes into unpainted area
-            let mid = candidate.midpoint();
+    fn new(path: &BezPath, rays: Vec<Line>, rib_candidates: Vec<Line>) -> Self {
+        // For each each candidate fit a circle around it's midpoint into the inked shape
+        let mut min_width = f64::MAX;
+        let mut max_width = f64::MIN;
+        let ribs = rib_candidates
+            .into_iter()
+            .filter_map(|candidate| {
+                // See if a circle around the midpoint of our line goes into unpainted area
+                let mid = candidate.midpoint();
 
-            // Try from the full line through to almost nothing
-            // Often times the end (t=0) reports winding 0
-            let mut t = 0.0;
-            let mut solution = None;
-            while solution.is_none() && t < 0.03 {
-                // If 360 points spun around mid are all inked take this as a valid result
-                // TODO: not brute force :)
-                let pt = candidate.eval(t);
-                if (0..360).all(|i| {
-                    let pt = Affine::rotate_about((i as f64).to_radians(), mid) * pt;
-                    path.winding(pt) != 0
-                }) {
-                    solution = Some((*candidate, Circle::new(mid, (pt - mid).length())));
+                // Try from the full line through to almost nothing
+                // Often times the end (t=0) reports winding 0
+                let mut t = 0.0;
+                let mut inc = 0.001;
+                let mut solution = None;
+                while solution.is_none() && t <= 0.1 {
+                    // If points around mid are all inked take this as a valid result
+                    // TODO: not brute force :)
+                    let pt = candidate.eval(t);
+                    let samples = 90;
+                    if (0..samples).all(|i| {
+                        let rot = i as f64 * 360.0 / samples as f64;
+                        let pt = Affine::rotate_about(rot.to_radians(), mid) * pt;
+                        path.winding(pt) != 0
+                    }) {
+                        let radius = (pt - mid).length();
+                        if radius > 1.0 {
+                            let candidate_length = candidate.length();
+                            min_width = min_width.min(candidate_length);
+                            max_width = max_width.max(candidate_length);
+                            solution = Some((candidate, Circle::new(mid, radius)));
+                        } else {
+                            // Still getting very short line segments sometimes
+                            debug!("Suspiciously small rib, {candidate:?}");
+                        }
+                    }
+                    t += inc;
+                    inc += inc;
                 }
-                t += 0.01;
+                solution
+            })
+            .collect::<Vec<_>>();
+
+        Self {
+            rays,
+            ribs,
+            min_width,
+            max_width,
+        }
+    }
+}
+
+/// Multiplier to convert font units to normalized (common upem) units
+fn normalization_scale(font: &skrifa::FontRef) -> f64 {
+    let head = font.head().expect("Must have head");
+    let upem = head.units_per_em() as f64;
+    1000.0 / upem
+}
+
+fn setup_logging(log_filters: Option<&str>) {
+    use std::io::Write;
+    let mut log_cfg = env_logger::builder();
+    log_cfg.format(|buf, record| {
+        let ts = buf.timestamp_micros();
+        let style = buf.default_level_style(record.level());
+        writeln!(
+            buf,
+            "[{ts} {:?} {} {style}{}{style:#}] {}",
+            std::thread::current().id(),
+            record.target(),
+            record.level(),
+            record.args()
+        )
+    });
+    if let Some(log_filters) = log_filters {
+        log_cfg.parse_filters(log_filters);
+    }
+    log_cfg.init();
+}
+
+fn locations_of_interest(font: &skrifa::FontRef) -> Vec<UserLocation> {
+    const WGHT_TAG: Tag = Tag::new(b"wght");
+    let result = vec![UserLocation::new()];
+
+    let Ok(fvar) = font.fvar() else {
+        return result;
+    };
+    let Some(wght_axis) = fvar
+        .axes()
+        .unwrap()
+        .iter()
+        .find(|a| a.axis_tag() == WGHT_TAG)
+    else {
+        return result;
+    };
+
+    let mut result = Vec::new();
+    for wght in
+        (wght_axis.min_value.get().to_i32()..=wght_axis.max_value.get().to_i32()).step_by(100)
+    {
+        let mut user = UserLocation::new();
+        user.insert(WGHT_TAG, UserCoord::new(wght));
+        result.push(user);
+    }
+    result
+}
+
+fn name(font: &skrifa::FontRef) -> String {
+    let table = font.name().expect("Must have name");
+    let nr = table
+        .name_record()
+        .iter()
+        // aren't mismatched copies of read-fonts fun
+        .find(|nr| nr.name_id().to_u16() == NameId::FAMILY_NAME.to_u16())
+        .expect("Must have a family name");
+    let name = nr
+        .string(table.string_data())
+        .expect("To read name contents");
+    name.to_string()
+}
+
+fn csv_fragment(user: &UserLocation) -> String {
+    user.iter()
+        .map(|(tag, coord)| {
+            let v = coord.to_f64();
+            if v == v.round() {
+                format!("{tag}@{}", v as i32)
+            } else {
+                format!("{tag}@{:.2}", v)
             }
-            solution
         })
-    }
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
-trait Round1 {
-    fn round1(self) -> Self;
-}
-
-impl Round1 for f64 {
-    fn round1(self) -> Self {
-        (self * 10.0).round() / 10.0
-    }
-}
-
-impl Round1 for Point {
-    fn round1(self) -> Self {
-        Self {
-            x: self.x.round1(),
-            y: self.y.round1(),
-        }
-    }
-}
-
-impl Round1 for Line {
-    fn round1(self) -> Self {
-        Self {
-            p0: self.p0.round1(),
-            p1: self.p1.round1(),
-        }
-    }
+fn filename_fragment(user: &UserLocation) -> String {
+    user.iter()
+        .map(|(tag, coord)| format!("{tag}{:.2}", coord.to_f64()))
+        .collect::<Vec<_>>()
+        .join("_")
 }
 
 fn main() {
     let args = Args::parse();
+    setup_logging(args.log.as_deref());
+
     let font_path = if args.font.starts_with("~") {
         let mut d = home_dir().expect("Must have a home dir");
         d.push(&args.font[1..]);
@@ -517,33 +594,75 @@ fn main() {
     };
     let raw_font =
         fs::read(&font_path).unwrap_or_else(|e| panic!("Unable to read {font_path:?}: {e}"));
-    let builder = DebugSvgBuilder::new(&raw_font, args.char);
+    let font = skrifa::FontRef::new(&raw_font).expect("A font");
 
-    let candidates = match args.method {
-        SegmentSelection::CenterOfMass => builder.cast_rays_around_center_of_mass(),
-        SegmentSelection::AllSegments => builder.cast_rays_from_all_segments(),
-    };
+    let locs = locations_of_interest(&font);
+    let scale = normalization_scale(&font);
+    let name = name(&font);
 
-    let unique_candidates = candidates
-        .candidates
-        .iter()
-        .map(|c| {
-            let c = c.round1();
-            (
-                (OrderedFloat(c.p0.x), OrderedFloat(c.p0.y)),
-                (OrderedFloat(c.p1.x), OrderedFloat(c.p1.y)),
-            )
-        })
-        .collect::<HashSet<_>>();
-
-    eprintln!(
-        "{} candidates, {} unique",
-        candidates.candidates.len(),
-        unique_candidates.len()
+    let mut debug_html = String::new();
+    debug_html.push_str(
+        r#"
+        <style>
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+        }
+        </style>
+        "#,
     );
+    debug_html.push_str("<div class=\"grid\">\n");
 
-    let svg = builder.debug_svg(args.show_rays, &candidates);
+    for user_loc in locs.iter() {
+        let norm_loc = font.axes().location(
+            &user_loc
+                .iter()
+                .map(|(tag, coord)| (tag.clone(), coord.to_f64() as f32))
+                .collect::<Vec<_>>(),
+        );
+        let builder = WidthReader::new(&raw_font, args.char, &norm_loc);
 
-    eprintln!("Writing {}", args.output_svg);
-    fs::write(Path::new(&args.output_svg), &svg).expect("To write output file");
+        let width_candidates = match args.method {
+            SegmentSelection::CenterOfMass => builder.cast_rays_around_center_of_mass(),
+            SegmentSelection::AllSegments => builder.cast_rays_from_all_segments(),
+        };
+
+        // Emit tags in normalized scale
+        println!(
+            "{name}, {}, /quant/stroke_width_min, {:.2}",
+            csv_fragment(user_loc),
+            width_candidates.min_width * scale
+        );
+        println!(
+            "{name}, {}, /quant/stroke_width_max, {:.2}",
+            csv_fragment(user_loc),
+            width_candidates.max_width * scale
+        );
+
+        let svg = builder.debug_svg(args.show_rays, &width_candidates);
+
+        let output_file = PathBuf::from(&args.output_svg);
+        let output_file = output_file.with_file_name(format!(
+            "{}{}.{}",
+            output_file.file_stem().unwrap().to_str().unwrap(),
+            filename_fragment(user_loc),
+            output_file.extension().unwrap().to_str().unwrap()
+        ));
+        info!("Writing {:?}", output_file);
+        fs::write(&output_file, &svg).expect("To write output file");
+
+        // debug_html.push_str("<div>\n");
+        // debug_html.push_str(output_file.file_stem().unwrap().to_str().unwrap());
+        // debug_html.push_str("</div><div>\n");
+        debug_html.push_str("<div>\n");
+        debug_html.push_str(&svg);
+        debug_html.push_str("</div>\n");
+    }
+    debug_html.push_str("</div>\n");
+
+    if let Some(debug_html_file) = &args.debug_html {
+        let debug_html_file = PathBuf::from(&debug_html_file);
+        info!("Writing {:?}", debug_html_file);
+        fs::write(debug_html_file, &debug_html).expect("To write output file");
+    }
 }

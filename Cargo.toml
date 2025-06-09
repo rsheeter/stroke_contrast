@@ -10,3 +10,10 @@ clap = { version = "4.5.37", features = ["derive"] }
 home-dir = "0.1.0"
 skrifa = "0.31.3"
 ordered-float = "5.0.0"
+
+# shouldn't have to specify but harfruzz and skrifa don't agree
+# set to the harfruzz version so we can provide its desired type
+read-fonts = "0.28.0"
+log = "0.4.27"
+env_logger = "0.11.8"
+fontdrasil = "0.2.0"
