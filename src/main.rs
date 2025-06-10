@@ -159,6 +159,9 @@ impl WidthReader {
         let mut pen = PathPen::default();
 
         let glyphs = shape(&format!("{}", ch), &harf_font_ref, &LocationRef::from(loc));
+        if glyphs.is_empty() || glyphs.glyph_infos().iter().any(|gi| gi.glyph_id == 0) {
+            panic!("Shaping failed {glyphs:#?}");
+        }
         for (glyph_info, pos) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
             let glyph = outlines
                 .get(glyph_info.glyph_id.into())
@@ -406,7 +409,9 @@ impl WidthReader {
                 l if (l - candidates.max_width).abs() <= tolerance => {
                     (3.0 * self.ray_width, "pink", "green")
                 }
-                l if (l - candidates.min_width).abs() <= tolerance => (3.0 * self.ray_width, "pink", "red"),
+                l if (l - candidates.min_width).abs() <= tolerance => {
+                    (3.0 * self.ray_width, "pink", "red")
+                }
                 _ => (self.ray_width, "pink", "magenta"),
             };
             svg.push_str(&format!("  <line stroke=\"{rib_color}\" stroke-width=\"{}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" />\n",
