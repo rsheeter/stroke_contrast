@@ -401,25 +401,24 @@ impl WidthReader {
         }
 
         let tolerance = 0.1;
-        for (candidate, stroke_dot) in candidates.ribs.iter() {
-            let (width, color) = match candidate.length() {
+        for (rib, candidate) in candidates.ribs.iter() {
+            let (width, rib_color, circle_color) = match 2.0 * candidate.radius {
                 l if (l - candidates.max_width).abs() <= tolerance => {
-                    (3.0 * self.ray_width, "green")
+                    (3.0 * self.ray_width, "pink", "green")
                 }
-                l if (l - candidates.min_width).abs() <= tolerance => (3.0 * self.ray_width, "red"),
-                _ => (self.ray_width, "pink"),
+                l if (l - candidates.min_width).abs() <= tolerance => (3.0 * self.ray_width, "pink", "red"),
+                _ => (self.ray_width, "pink", "magenta"),
             };
-            svg.push_str(&format!("  <line stroke=\"{color}\" stroke-width=\"{}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" />\n",
-                width, candidate.p0.x, candidate.p0.y, candidate.p1.x, candidate.p1.y));
+            svg.push_str(&format!("  <line stroke=\"{rib_color}\" stroke-width=\"{}\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" />\n",
+                width, rib.p0.x, rib.p0.y, rib.p1.x, rib.p1.y));
 
-            svg.push_str(&format!("  <circle r=\"{}\" ", stroke_dot.radius));
+            svg.push_str(&format!("  <circle r=\"{}\" ", candidate.radius));
             svg.push_str(&format!(
                 "cx=\"{}\" cy=\"{}\" ",
-                stroke_dot.center.x, stroke_dot.center.y
+                candidate.center.x, candidate.center.y
             ));
             svg.push_str(&format!(
-                "fill=\"none\" stroke=\"magenta\" stroke-width=\"{}\"",
-                self.ray_width
+                "fill=\"none\" stroke=\"{circle_color}\" stroke-width=\"{width}\"",
             ));
             svg.push_str("/>\n");
         }
@@ -466,7 +465,7 @@ impl WidthCandidates {
                     }) {
                         let radius = (pt - mid).length();
                         if radius > 1.0 {
-                            let candidate_length = candidate.length();
+                            let candidate_length = 2.0 * radius;
                             min_width = min_width.min(candidate_length);
                             max_width = max_width.max(candidate_length);
                             solution = Some((candidate, Circle::new(mid, radius)));
