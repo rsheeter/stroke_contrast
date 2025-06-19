@@ -1,0 +1,16 @@
+[package]
+name = "stroke_contrast"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+harfruzz.workspace = true
+kurbo.workspace = true
+clap.workspace = true
+skrifa.workspace = true
+ordered-float = "5.0.0"
+
+read-fonts.workspace = true
+log.workspace = true
+env_logger.workspace = true
+fontdrasil.workspace = true

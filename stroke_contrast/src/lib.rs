@@ -1,15 +1,11 @@
-use std::{env::home_dir, fs, path::PathBuf};
-
-use args::{Args, SegmentSelection};
-use clap::Parser;
 use fontdrasil::coords::{UserCoord, UserLocation};
 use harfruzz::{GlyphBuffer, ShaperFont};
 use kurbo::{
     Affine, BezPath, Circle, Line, ParamCurve, ParamCurveNearest, PathSeg, Point, Rect, Shape, Vec2,
 };
-use log::{debug, info, warn};
+use log::{debug, warn};
 use ordered_float::OrderedFloat;
-use read_fonts::types::{F2Dot14, NameId};
+use read_fonts::types::F2Dot14;
 use skrifa::{
     MetadataProvider, Tag,
     instance::Location,
@@ -18,7 +14,55 @@ use skrifa::{
     raw::TableProvider,
 };
 
-mod args;
+pub fn csv_fragment(user: &UserLocation) -> String {
+    if user.iter().next().is_none() {
+        return String::from("");
+    }
+    let tags = user.axis_tags().map(|t| t.to_string()).collect::<Vec<_>>();
+    let tags = tags.join(",");
+    let values = user.iter().map(|(_, coord)| {
+            let v = coord.to_f64();
+            if v == v.round() {
+                format!("{}", v as i32)
+            } else {
+                format!("{:.2}", v)
+            }
+        }).collect::<Vec<_>>();
+    let values = values.join(",");
+    let maybe_quote = if tags.contains(",") {
+        "\""
+    } else {
+        ""
+    };
+    maybe_quote.to_string() + &tags + "@" + &values + maybe_quote
+}
+
+pub fn locations_of_interest(font: &skrifa::FontRef) -> Vec<UserLocation> {
+    const WGHT_TAG: Tag = Tag::new(b"wght");
+    let result = vec![UserLocation::new()];
+
+    let Ok(fvar) = font.fvar() else {
+        return result;
+    };
+    let Some(wght_axis) = fvar
+        .axes()
+        .unwrap()
+        .iter()
+        .find(|a| a.axis_tag() == WGHT_TAG)
+    else {
+        return result;
+    };
+
+    let mut result = Vec::new();
+    for wght in
+        (wght_axis.min_value.get().to_i32()..=wght_axis.max_value.get().to_i32()).step_by(100)
+    {
+        let mut user = UserLocation::new();
+        user.insert(WGHT_TAG, UserCoord::new(wght));
+        result.push(user);
+    }
+    result
+}
 
 trait Tangent {
     // Returns (point at t, vector in direction of tangent)
@@ -142,15 +186,15 @@ fn shape(text: &str, font: &harfruzz::FontRef, loc: &LocationRef) -> GlyphBuffer
     harfruzz::shape(&face, &[], buffer)
 }
 
-struct WidthReader {
-    path: BezPath,
-    bbox: Rect,
-    max_dim: f64,
-    ray_width: f64,
+pub struct WidthReader {
+    pub path: BezPath,
+    pub bbox: Rect,
+    pub max_dim: f64,
+    pub ray_width: f64,
 }
 
 impl WidthReader {
-    fn new(raw_font: &[u8], ch: char, loc: &Location) -> Self {
+    pub fn new(raw_font: &[u8], ch: char, loc: &Location) -> Self {
         let harf_font_ref =
             harfruzz::FontRef::new(&raw_font).expect("For font files to be font files!");
         let skrifa_font_ref = skrifa::FontRef::new(&raw_font).expect("Fonts to be fonts");
@@ -194,7 +238,7 @@ impl WidthReader {
     }
 
     /// Spray rays from center of mass. Currently baselessly assumes center of mass will be uninked.
-    fn cast_rays_around_center_of_mass(&self) -> WidthCandidates {
+    pub fn cast_rays_around_center_of_mass(&self) -> WidthCandidates {
         // Brute force discovery of interior pixels and center of mass
         // TODO: migrate to analytic solution once available in kurbo
         let bbox = self.bbox;
@@ -312,7 +356,7 @@ impl WidthReader {
         WidthCandidates::new(&self.path, rays, ribs)
     }
 
-    fn cast_rays_from_all_segments(&self) -> WidthCandidates {
+    pub fn cast_rays_from_all_segments(&self) -> WidthCandidates {
         let mut rays = Vec::new();
         let mut ribs = Vec::new();
         for segment in self.path.segments() {
@@ -383,7 +427,7 @@ impl WidthReader {
             )
     }
 
-    fn debug_svg(&self, show_rays: bool, candidates: &WidthCandidates) -> String {
+    pub fn debug_svg(&self, show_rays: bool, candidates: &WidthCandidates) -> String {
         let mut svg = String::new();
         svg.push_str(r#"<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox=""#);
         svg.push_str(&format!("{:02} ", self.bbox.min_x()));
@@ -435,11 +479,11 @@ impl WidthReader {
 
 /// Each candidate is a line segment contained within the inked part of a path that might be a stroke width
 #[derive(Debug, Default)]
-struct WidthCandidates {
-    rays: Vec<Line>,
-    ribs: Vec<(Line, Circle)>,
-    min_width: f64,
-    max_width: f64,
+pub struct WidthCandidates {
+    pub rays: Vec<Line>,
+    pub ribs: Vec<(Line, Circle)>,
+    pub min_width: f64,
+    pub max_width: f64,
 }
 
 impl WidthCandidates {
@@ -496,177 +540,8 @@ impl WidthCandidates {
 }
 
 /// Multiplier to convert font units to normalized (common upem) units
-fn normalization_scale(font: &skrifa::FontRef) -> f64 {
+pub fn normalization_scale(font: &skrifa::FontRef) -> f64 {
     let head = font.head().expect("Must have head");
     let upem = head.units_per_em() as f64;
     1000.0 / upem
-}
-
-fn setup_logging(log_filters: Option<&str>) {
-    use std::io::Write;
-    let mut log_cfg = env_logger::builder();
-    log_cfg.format(|buf, record| {
-        let ts = buf.timestamp_micros();
-        let style = buf.default_level_style(record.level());
-        writeln!(
-            buf,
-            "[{ts} {:?} {} {style}{}{style:#}] {}",
-            std::thread::current().id(),
-            record.target(),
-            record.level(),
-            record.args()
-        )
-    });
-    if let Some(log_filters) = log_filters {
-        log_cfg.parse_filters(log_filters);
-    }
-    log_cfg.init();
-}
-
-fn locations_of_interest(font: &skrifa::FontRef) -> Vec<UserLocation> {
-    const WGHT_TAG: Tag = Tag::new(b"wght");
-    let result = vec![UserLocation::new()];
-
-    let Ok(fvar) = font.fvar() else {
-        return result;
-    };
-    let Some(wght_axis) = fvar
-        .axes()
-        .unwrap()
-        .iter()
-        .find(|a| a.axis_tag() == WGHT_TAG)
-    else {
-        return result;
-    };
-
-    let mut result = Vec::new();
-    for wght in
-        (wght_axis.min_value.get().to_i32()..=wght_axis.max_value.get().to_i32()).step_by(100)
-    {
-        let mut user = UserLocation::new();
-        user.insert(WGHT_TAG, UserCoord::new(wght));
-        result.push(user);
-    }
-    result
-}
-
-fn name(font: &skrifa::FontRef) -> String {
-    let table = font.name().expect("Must have name");
-    let nr = table
-        .name_record()
-        .iter()
-        // aren't mismatched copies of read-fonts fun
-        .find(|nr| nr.name_id().to_u16() == NameId::FAMILY_NAME.to_u16())
-        .expect("Must have a family name");
-    let name = nr
-        .string(table.string_data())
-        .expect("To read name contents");
-    name.to_string()
-}
-
-fn csv_fragment(user: &UserLocation) -> String {
-    user.iter()
-        .map(|(tag, coord)| {
-            let v = coord.to_f64();
-            if v == v.round() {
-                format!("{tag}@{}", v as i32)
-            } else {
-                format!("{tag}@{:.2}", v)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-fn filename_fragment(user: &UserLocation) -> String {
-    user.iter()
-        .map(|(tag, coord)| format!("{tag}{:.2}", coord.to_f64()))
-        .collect::<Vec<_>>()
-        .join("_")
-}
-
-fn main() {
-    let args = Args::parse();
-    setup_logging(args.log.as_deref());
-
-    let font_path = if args.font.starts_with("~") {
-        let mut d = home_dir().expect("Must have a home dir");
-        d.push(&args.font[1..]);
-        d
-    } else {
-        PathBuf::from(&args.font)
-    };
-    let raw_font =
-        fs::read(&font_path).unwrap_or_else(|e| panic!("Unable to read {font_path:?}: {e}"));
-    let font = skrifa::FontRef::new(&raw_font).expect("A font");
-
-    let locs = locations_of_interest(&font);
-    let scale = normalization_scale(&font);
-    let name = name(&font);
-
-    let mut debug_html = String::new();
-    debug_html.push_str(
-        r#"
-        <style>
-        .grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr;
-        }
-        </style>
-        "#,
-    );
-    debug_html.push_str("<div class=\"grid\">\n");
-
-    for user_loc in locs.iter() {
-        let norm_loc = font.axes().location(
-            &user_loc
-                .iter()
-                .map(|(tag, coord)| (tag.clone(), coord.to_f64() as f32))
-                .collect::<Vec<_>>(),
-        );
-        let builder = WidthReader::new(&raw_font, args.char, &norm_loc);
-
-        let width_candidates = match args.method {
-            SegmentSelection::CenterOfMass => builder.cast_rays_around_center_of_mass(),
-            SegmentSelection::AllSegments => builder.cast_rays_from_all_segments(),
-        };
-
-        // Emit tags in normalized scale
-        println!(
-            "{name}, {}, /quant/stroke_width_min, {:.2}",
-            csv_fragment(user_loc),
-            width_candidates.min_width * scale
-        );
-        println!(
-            "{name}, {}, /quant/stroke_width_max, {:.2}",
-            csv_fragment(user_loc),
-            width_candidates.max_width * scale
-        );
-
-        let svg = builder.debug_svg(args.show_rays, &width_candidates);
-
-        let output_file = PathBuf::from(&args.output_svg);
-        let output_file = output_file.with_file_name(format!(
-            "{}{}.{}",
-            output_file.file_stem().unwrap().to_str().unwrap(),
-            filename_fragment(user_loc),
-            output_file.extension().unwrap().to_str().unwrap()
-        ));
-        info!("Writing {:?}", output_file);
-        fs::write(&output_file, &svg).expect("To write output file");
-
-        // debug_html.push_str("<div>\n");
-        // debug_html.push_str(output_file.file_stem().unwrap().to_str().unwrap());
-        // debug_html.push_str("</div><div>\n");
-        debug_html.push_str("<div>\n");
-        debug_html.push_str(&svg);
-        debug_html.push_str("</div>\n");
-    }
-    debug_html.push_str("</div>\n");
-
-    if let Some(debug_html_file) = &args.debug_html {
-        let debug_html_file = PathBuf::from(&debug_html_file);
-        info!("Writing {:?}", debug_html_file);
-        fs::write(debug_html_file, &debug_html).expect("To write output file");
-    }
 }

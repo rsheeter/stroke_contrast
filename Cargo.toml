@@ -1,15 +1,11 @@
-[package]
-name = "stroke_contrast"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-harfruzz = "0.1.0"
-kurbo = "0.11.2"
+[workspace.dependencies]
 clap = { version = "4.5.37", features = ["derive"] }
-home-dir = "0.1.0"
+regex = "1.11.1"
+
+kurbo = "0.11.2"
+
+harfruzz = "0.1.0"
 skrifa = "0.31.3"
-ordered-float = "5.0.0"
 
 # shouldn't have to specify but harfruzz and skrifa don't agree
 # set to the harfruzz version so we can provide its desired type
@@ -17,3 +13,11 @@ read-fonts = "0.28.0"
 log = "0.4.27"
 env_logger = "0.11.8"
 fontdrasil = "0.2.0"
+
+[workspace]
+resolver = "2"
+
+members = [
+    "stroke_contrast",
+    "batch",
+]

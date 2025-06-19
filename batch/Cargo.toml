@@ -1,0 +1,16 @@
+[package]
+name = "batch"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap.workspace = true
+gf-metadata = "0.1.0"
+regex.workspace = true
+stroke_contrast = { path = "../stroke_contrast" }
+
+skrifa.workspace = true
+read-fonts.workspace = true
+log.workspace = true
+env_logger.workspace = true
+fontdrasil.workspace = true
