@@ -5,7 +5,8 @@ edition = "2024"
 
 [dependencies]
 clap.workspace = true
-gf-metadata = "0.1.0"
+#gf-metadata = "0.1.0"
+gf-metadata = { path = "../../embed1/gf-metadata" }
 regex.workspace = true
 stroke_contrast = { path = "../stroke_contrast" }
 

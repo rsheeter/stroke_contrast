@@ -20,20 +20,19 @@ pub fn csv_fragment(user: &UserLocation) -> String {
     }
     let tags = user.axis_tags().map(|t| t.to_string()).collect::<Vec<_>>();
     let tags = tags.join(",");
-    let values = user.iter().map(|(_, coord)| {
+    let values = user
+        .iter()
+        .map(|(_, coord)| {
             let v = coord.to_f64();
             if v == v.round() {
                 format!("{}", v as i32)
             } else {
                 format!("{:.2}", v)
             }
-        }).collect::<Vec<_>>();
+        })
+        .collect::<Vec<_>>();
     let values = values.join(",");
-    let maybe_quote = if tags.contains(",") {
-        "\""
-    } else {
-        ""
-    };
+    let maybe_quote = if tags.contains(",") { "\"" } else { "" };
     maybe_quote.to_string() + &tags + "@" + &values + maybe_quote
 }
 

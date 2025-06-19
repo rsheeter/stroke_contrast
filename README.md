@@ -1,12 +1,8 @@
+# Exploratory hackery
 
-Ill-formed idea:
+Quick and dirty exploration of finding stroke width.
 
-* Fail if center of mass is inside shape
-* Cast rays from center of mass
-* Find intersections of path segments and rays
-* For each ray, find the nearest intersection
-    * this _should_ be a transition from not-ink (nearer center of mass) to ink
-
+## Run one
 
 ```shell
 $ cargo run -- -c o --font ~/oss/fonts/ofl/lobster/Lobster-Regular.ttf --method all-segments
@@ -28,4 +24,14 @@ $ cargo run -- -c o --font ~/oss/fonts/ofl/allura/Allura-Regular.ttf --method ce
 # Fun because it has holes
 $ cargo run -- -c o --font ~/oss/fonts/ofl/kablammo/Kablammo[MORF].ttf --method center-of-mass
 $ cargo run -- -c o --font ~/oss/fonts/ofl/kablammo/Kablammo[MORF].ttf --method all-segments
+```
+
+## Run batch
+
+```shell
+$ cargo build --release
+
+# Targeting is used because some families (think Rubik Glitch) don't get good results
+# By default only families that don't yet have values are processed
+$ target/release/batch --tag-filter "/Expressive/Business"
 ```

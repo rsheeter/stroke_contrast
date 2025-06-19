@@ -1,16 +1,22 @@
-use std::{collections::HashSet, env::home_dir, fs, path::PathBuf};
+use std::{
+    collections::HashSet,
+    env::home_dir,
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+};
 
 use clap::Parser;
 use fontdrasil::coords::UserCoord;
 use gf_metadata::GoogleFonts;
 use regex::Regex;
 use skrifa::{MetadataProvider, Tag};
-use stroke_contrast::{csv_fragment, locations_of_interest, normalization_scale, WidthReader};
+use stroke_contrast::{WidthReader, csv_fragment, locations_of_interest, normalization_scale};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Where to save svg files
+    /// Where the Google Fonts github repo is cloned
     #[arg(long, default_value = "~/oss/fonts")]
     gf_repo: String,
 
@@ -21,9 +27,25 @@ struct Args {
     /// Tag filter, retain only families that have tags that contain this regex.
     #[arg(long)]
     tag_filter: String,
+
+    /// What file stores values
+    #[arg(long, default_value = "~/oss/fonts/tags/all/experimental_quant.csv")]
+    target: String,
+}
+
+fn flag_path(flag: &str) -> PathBuf {
+    if flag.starts_with("~/") {
+        let mut d = home_dir().expect("Must have a home dir");
+        d.push(&flag[2..]);
+        d
+    } else {
+        PathBuf::from(flag)
+    }
 }
 
 fn main() {
+    const STROKE_WIDTH_MIN_TAG: &str = "/quant/stroke_width_min";
+    const STROKE_WIDTH_MAX_TAG: &str = "/quant/stroke_width_max";
     const WGHT_TAG: Tag = Tag::new(b"wght");
     const ITAL_TAG: Tag = Tag::new(b"ital");
 
@@ -34,32 +56,49 @@ fn main() {
         .family_filter
         .map(|f| Regex::new(&f).expect("A valid filter regex"));
 
-    let gf_repo = if args.gf_repo.starts_with("~/") {
-        let mut d = home_dir().expect("Must have a home dir");
-        d.push(&args.gf_repo[2..]);
-        d
-    } else {
-        PathBuf::from(&args.gf_repo)
-    };
+    let gf_repo = flag_path(&args.gf_repo);
+    let target_file = flag_path(&args.target);
 
-    eprintln!("Loading from {gf_repo:?}");
+    println!("Loading from {gf_repo:?}");
     let gf = GoogleFonts::new(gf_repo, family_filter);
 
-    let mut char_not_supported = Vec::new();
+    println!("Writing tags to {target_file:?}");
+    let existing_tags = gf
+        .tags()
+        .expect("To read tags")
+        .iter()
+        .map(|t| (t.family.as_str(), t.tag.as_str()))
+        .collect::<HashSet<_>>();
+
     let family_names = gf
         .tags()
         .expect("To read tags")
         .iter()
         .filter_map(|t| tag_filter.find(&t.tag).map(|_| t.family.as_str()))
         .collect::<HashSet<_>>();
-    for (local_path, family, font) in gf
+    let mut families = gf
         .families()
         .iter()
         .filter_map(|(p, f)| f.as_ref().ok().and_then(|f| Some((p, f))))
+        .collect::<Vec<_>>();
+    families.sort_by_key(|(_, f)| f.name());
+
+    for (local_path, family, font) in families
+        .iter()
         .filter(|(_, f)| family_names.contains(f.name()))
         .flat_map(|(p, f)| f.fonts.iter().map(move |font| (p, f, font)))
     {
-        let mut font_path = local_path.clone();
+        let has_min = existing_tags.contains(&(family.name(), STROKE_WIDTH_MIN_TAG));
+        let has_max = existing_tags.contains(&(family.name(), STROKE_WIDTH_MAX_TAG));
+        if has_min != has_max {
+            panic!("{} has only ONE of stroke min/max", family.name());
+        }
+        if has_min {
+            println!("Skip {}, has values already", family.name());
+            continue;
+        }
+
+        let mut font_path = (*local_path).clone();
         font_path.pop();
         font_path.push(font.filename());
 
@@ -68,7 +107,7 @@ fn main() {
         let font_ref = skrifa::FontRef::new(&raw_font).expect("A font");
 
         if font_ref.charmap().map('o').is_none() {
-            char_not_supported.push(font.filename());
+            eprintln!("Measurement char not supported by {}", font.filename());
             continue;
         }
 
@@ -89,6 +128,7 @@ fn main() {
             }
         }
 
+        let mut tag_lines = Vec::new();
         for user_loc in user_locs {
             let norm_loc = font_ref.axes().location(
                 &user_loc
@@ -100,22 +140,28 @@ fn main() {
 
             let width_candidates = builder.cast_rays_around_center_of_mass();
             // Emit tags in normalized scale
-            println!(
-                "{}, {}, /quant/stroke_width_min, {:.2}",
+
+            tag_lines.push(format!(
+                "{}, {}, {STROKE_WIDTH_MIN_TAG}, {:.2}",
                 family.name(),
                 csv_fragment(&user_loc),
                 width_candidates.min_width * scale
-            );
-            println!(
-                "{}, {}, /quant/stroke_width_max, {:.2}",
+            ));
+            tag_lines.push(format!(
+                "{}, {}, {STROKE_WIDTH_MAX_TAG}, {:.2}",
                 family.name(),
                 csv_fragment(&user_loc),
                 width_candidates.max_width * scale
-            );
+            ));
         }
-    }
 
-    for unsupported in char_not_supported {
-        eprintln!("Measurement char not supported by {unsupported}");
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&target_file)
+            .expect("To open output file");
+        for line in tag_lines.iter() {
+            writeln!(file, "{line}").expect("To write target file");
+        }
+        println!("Wrote {} tag lines for {}", tag_lines.len(), family.name());
     }
 }
