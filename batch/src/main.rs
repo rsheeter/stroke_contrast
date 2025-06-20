@@ -88,6 +88,8 @@ fn main() {
         .filter(|(_, f)| family_names.contains(f.name()))
         .flat_map(|(p, f)| f.fonts.iter().map(move |font| (p, f, font)))
     {
+        // TODO: we should check if we have values for the exact set of user loc and redo
+        // the entire family - meaning delete old values and write new ones - if not
         let has_min = existing_tags.contains(&(family.name(), STROKE_WIDTH_MIN_TAG));
         let has_max = existing_tags.contains(&(family.name(), STROKE_WIDTH_MAX_TAG));
         if has_min != has_max {
@@ -142,13 +144,13 @@ fn main() {
             // Emit tags in normalized scale
 
             tag_lines.push(format!(
-                "{}, {}, {STROKE_WIDTH_MIN_TAG}, {:.2}",
+                "{},{},{STROKE_WIDTH_MIN_TAG},{:.2}",
                 family.name(),
                 csv_fragment(&user_loc),
                 width_candidates.min_width * scale
             ));
             tag_lines.push(format!(
-                "{}, {}, {STROKE_WIDTH_MAX_TAG}, {:.2}",
+                "{},{},{STROKE_WIDTH_MAX_TAG},{:.2}",
                 family.name(),
                 csv_fragment(&user_loc),
                 width_candidates.max_width * scale
